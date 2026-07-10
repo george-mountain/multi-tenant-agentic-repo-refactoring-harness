@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import DiffView from "../components/DiffView";
 import { GitHubIcon } from "../components/Logo";
 import StatusBadge from "../components/StatusBadge";
 import Stepper from "../components/Stepper";
@@ -68,9 +69,11 @@ function describeEvent(event: RunEvent): { text: string; cls: string } {
 
 export default function RunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
+  const navigate = useNavigate();
   const [run, setRun] = useState<Run | null>(null);
   const [diff, setDiff] = useState<{ step: number; text: string } | null>(null);
   const [approving, setApproving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
   const terminal = run !== null && TERMINAL_STATUSES.includes(run.status);
@@ -119,6 +122,17 @@ export default function RunDetailPage() {
     }
   }
 
+  async function retry() {
+    if (!runId) return;
+    setRetrying(true);
+    try {
+      const fresh = await api.retryRun(runId);
+      navigate(`/runs/${fresh.id}`);
+    } finally {
+      setRetrying(false);
+    }
+  }
+
   async function showDiff(step: number) {
     if (!runId) return;
     const text = await api.stepDiff(runId, step).catch(() => "Diff is not available yet.");
@@ -151,6 +165,11 @@ export default function RunDetailPage() {
         {run.status === "awaiting_approval" && (
           <button className="btn btn-primary" onClick={approve} disabled={approving}>
             {approving ? "Starting…" : "Approve plan & start"}
+          </button>
+        )}
+        {run.status === "failed" && (
+          <button className="btn btn-primary" onClick={retry} disabled={retrying}>
+            {retrying ? "Starting…" : "↻ Retry run"}
           </button>
         )}
         {run.pr_url && (
@@ -271,7 +290,7 @@ export default function RunDetailPage() {
               Close
             </button>
           </div>
-          <pre className="diff">{diff.text}</pre>
+          <DiffView text={diff.text} />
         </div>
       )}
 

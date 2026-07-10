@@ -407,6 +407,13 @@ a:hover { text-decoration: underline; }
 .icon-btn:hover:not(:disabled) { color: var(--danger); border-color: rgba(255, 107, 107, 0.4); background: var(--danger-dim); }
 .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.row-actions { display: inline-flex; gap: 6px; justify-content: flex-end; }
+.icon-btn.retry-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: rgba(109, 138, 255, 0.4);
+  background: var(--info-dim);
+}
+
 .scroll-sentinel {
   display: flex;
   align-items: center;
@@ -614,15 +621,27 @@ li.skipped .step-marker { border-color: var(--warning); color: var(--warning); b
 
 pre.diff {
   margin: 0;
-  padding: 16px 20px;
+  padding: 12px 0;
   overflow: auto;
-  max-height: 460px;
+  max-height: 520px;
   font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.55;
   color: var(--text-2);
   background: var(--bg-elev);
 }
+pre.diff .dl {
+  display: block;
+  padding: 0 20px;
+  white-space: pre;
+  min-height: 1.55em;
+}
+pre.diff .diff-add { background: rgba(47, 213, 140, 0.13); color: #86e7bb; }
+pre.diff .diff-del { background: rgba(255, 107, 107, 0.13); color: #ff9d9d; }
+pre.diff .diff-hunk { color: var(--accent-2); background: rgba(143, 109, 255, 0.08); }
+pre.diff .diff-file { color: var(--text); font-weight: 600; background: rgba(255, 255, 255, 0.03); }
+pre.diff .diff-meta { color: var(--text-dim); }
+pre.diff .diff-ctx { color: var(--text-2); }
 
 .failure-banner {
   display: flex;
