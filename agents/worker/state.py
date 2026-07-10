@@ -17,6 +17,7 @@ class RunState(TypedDict, total=False):
     base_sha: str
     branch: str
     repo_tree: list[str]
+    baseline: dict
     plan: dict
     current_step: int
     attempt: int

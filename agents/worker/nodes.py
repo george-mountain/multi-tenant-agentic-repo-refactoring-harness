@@ -2,6 +2,7 @@
 import functools
 import json
 import logging
+import re
 import shlex
 
 import httpx
@@ -193,11 +194,88 @@ def _detect_commands(tree: list[str]) -> tuple[str, str]:
     test_cmd = ""
     lint_cmd = ""
     if has_py and any("test" in p for p in tree if p.endswith(".py")):
-        test_cmd = "python -m pytest -x -q"
+        # No -x: run the whole suite so failing-test ids can be diffed against the baseline.
+        # -rfE emits parseable "FAILED/ERROR <nodeid>" summary lines; --tb=short keeps tracebacks
+        # for the executor without flooding output.
+        test_cmd = "python -m pytest -q --tb=short -rfE -p no:cacheprovider"
         lint_cmd = "ruff check ."
     elif has_js:
         test_cmd = "npm test --silent"
     return test_cmd, lint_cmd
+
+
+def _parse_pytest(result) -> dict:
+    """Extract failing/erroring test node-ids and collectability from a pytest run."""
+    failing: set[str] = set()
+    for line in (result.stdout + "\n" + result.stderr).splitlines():
+        s = line.strip()
+        if s.startswith(("FAILED ", "ERROR ")):
+            node = s.split(" ", 1)[1].split(" - ", 1)[0].strip()
+            if node:
+                failing.add(node)
+    return {"exit_code": result.exit_code, "failing": sorted(failing)}
+
+
+def _parse_ruff(result) -> dict[str, list[str]]:
+    """Group ruff findings as {file: [codes]} (line numbers ignored so they survive edits)."""
+    by_file: dict[str, set[str]] = {}
+    pattern = re.compile(r"^(.+?):\d+:\d+:\s+([A-Z]+\d+)\b")
+    for line in (result.stdout + "\n" + result.stderr).splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            by_file.setdefault(m.group(1), set()).add(m.group(2))
+    return {f: sorted(c) for f, c in by_file.items()}
+
+
+def _is_ruff(lint_cmd: str) -> bool:
+    return lint_cmd.strip().startswith("ruff")
+
+
+async def _capture_baseline(run_id: str, test_cmd: str, lint_cmd: str) -> dict:
+    """Record test/lint failures on the pristine checkout so verification only blocks regressions."""
+    baseline: dict = {"test": None, "lint": None}
+    if test_cmd:
+        result = await _git(run_id, test_cmd, timeout=900)
+        baseline["test"] = _parse_pytest(result) if "pytest" in test_cmd else {
+            "exit_code": result.exit_code, "failing": []
+        }
+    if lint_cmd and _is_ruff(lint_cmd):
+        result = await _git(run_id, "ruff check . --output-format=concise", timeout=300)
+        baseline["lint"] = _parse_ruff(result)
+    return baseline
+
+
+def _test_regressed(base: dict | None, cur: dict) -> list[str]:
+    """Return the list of newly-failing tests the change introduced (empty = no regression)."""
+    base = base or {"exit_code": 0, "failing": []}
+    base_fail = set(base.get("failing") or [])
+    cur_fail = set(cur.get("failing") or [])
+    new_failures = sorted(cur_fail - base_fail)
+    base_collectable = base.get("exit_code") in (0, 1)
+    broke_collection = base_collectable and cur.get("exit_code") == 5
+    if broke_collection:
+        return ["test collection broke (previously-runnable tests can no longer be discovered)"]
+    return new_failures
+
+
+async def _lint_gate(run_id: str, lint_cmd: str, changed_py: list[str], baseline_lint: dict | None) -> dict | None:
+    """Lint only the files the step changed, and only flag codes not present in the baseline."""
+    if not lint_cmd or not _is_ruff(lint_cmd) or not changed_py:
+        return None
+    quoted = " ".join(shlex.quote(p) for p in changed_py)
+    result = await _git(run_id, f"ruff check {quoted} --output-format=concise", timeout=300)
+    if result.ok:
+        return None
+    cur = _parse_ruff(result)
+    base = baseline_lint or {}
+    new_findings: dict[str, list[str]] = {}
+    for path, codes in cur.items():
+        extra = sorted(set(codes) - set(base.get(path, [])))
+        if extra:
+            new_findings[path] = extra
+    if not new_findings:
+        return None
+    return {"kind": "lint", "detail": f"new lint issues introduced by this step: {new_findings}"}
 
 
 @node_guard
@@ -248,6 +326,15 @@ async def ingest(state: RunState) -> dict:
         test_cmd = detected_test
         lint_cmd = lint_cmd or detected_lint
 
+    baseline = await _capture_baseline(run_id, test_cmd, lint_cmd)
+    base_fail = len((baseline.get("test") or {}).get("failing") or [])
+    base_lint = sum(len(v) for v in (baseline.get("lint") or {}).values())
+    await events.log(
+        run_id,
+        f"baseline captured: {base_fail} pre-existing test failure(s), {base_lint} pre-existing lint finding(s) "
+        "(these will not block the refactor — only new regressions do)",
+    )
+
     if settings.github_token:
         try:
             from worker.github import check_push_access
@@ -270,6 +357,7 @@ async def ingest(state: RunState) -> dict:
         "repo_tree": tree,
         "test_cmd": test_cmd,
         "lint_cmd": lint_cmd,
+        "baseline": baseline,
         "current_step": 0,
         "attempt": 0,
         "error_log": [],
@@ -561,16 +649,29 @@ async def verify_gates(state: RunState) -> dict:
         )
 
     if not errors:
-        for kind, cmd in (("test", state.get("test_cmd")), ("lint", state.get("lint_cmd"))):
-            if not cmd:
-                continue
-            result = await _git(run_id, cmd, timeout=900)
-            if not result.ok:
+        baseline = state.get("baseline") or {}
+        test_cmd = state.get("test_cmd")
+        if test_cmd:
+            result = await _git(run_id, test_cmd, timeout=900)
+            cur = _parse_pytest(result) if "pytest" in test_cmd else {
+                "exit_code": result.exit_code, "failing": []
+            }
+            if "pytest" in test_cmd:
+                new_failures = _test_regressed(baseline.get("test"), cur)
+            else:
+                base_ok = (baseline.get("test") or {}).get("exit_code", 0) == 0
+                new_failures = ["tests failed"] if (not result.ok and base_ok) else []
+            if new_failures:
                 errors.append(
-                    {"kind": kind, "step_id": step["id"], "attempt": state["attempt"],
-                     "command": cmd, "exit_code": result.exit_code,
+                    {"kind": "test", "step_id": step["id"], "attempt": state["attempt"], "command": test_cmd,
+                     "exit_code": result.exit_code, "detail": f"new test failures: {new_failures[:15]}",
                      "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-4000:]}
                 )
+
+        changed_py = [p for flag, p in changed if "D" not in flag and p.endswith(".py")]
+        lint_error = await _lint_gate(run_id, state.get("lint_cmd") or "", changed_py, baseline.get("lint"))
+        if lint_error:
+            errors.append({**lint_error, "step_id": step["id"], "attempt": state["attempt"]})
 
     passed = not errors
     await events.publish(
@@ -780,17 +881,29 @@ async def commit_step(state: RunState) -> dict:
 
 @node_guard
 async def final_verify(state: RunState) -> dict:
-    """Full-suite verification of the completed tree, plus final patch export."""
+    """Full-suite verification of the completed tree (regression-only), plus final patch export."""
     run_id = state["run_id"]
     await events.status(run_id, "finalizing")
-    for kind, cmd in (("test", state.get("test_cmd")), ("lint", state.get("lint_cmd"))):
-        if not cmd:
-            continue
-        result = await _git(run_id, cmd, timeout=1200)
-        if not result.ok:
-            return {
-                "failure": f"final {kind} verification failed: {result.stderr[-2000:] or result.stdout[-2000:]}"
-            }
+    baseline = state.get("baseline") or {}
+
+    test_cmd = state.get("test_cmd")
+    if test_cmd:
+        result = await _git(run_id, test_cmd, timeout=1200)
+        cur = _parse_pytest(result) if "pytest" in test_cmd else {"exit_code": result.exit_code, "failing": []}
+        if "pytest" in test_cmd:
+            new_failures = _test_regressed(baseline.get("test"), cur)
+        else:
+            base_ok = (baseline.get("test") or {}).get("exit_code", 0) == 0
+            new_failures = ["tests failed"] if (not result.ok and base_ok) else []
+        if new_failures:
+            return {"failure": f"final test verification found regressions: {new_failures[:15]}"}
+
+    changed_all = (await _git(run_id, f"git diff --name-only {state['base_sha']}..HEAD")).stdout.splitlines()
+    changed_py = [p.strip() for p in changed_all if p.strip().endswith(".py")]
+    lint_error = await _lint_gate(run_id, state.get("lint_cmd") or "", changed_py, baseline.get("lint"))
+    if lint_error:
+        return {"failure": f"final lint verification found regressions: {lint_error['detail']}"}
+
     patch = (await _git(run_id, f"git diff {state['base_sha']}..HEAD")).stdout
     runtime.storage.put(final_patch_key(run_id), patch.encode("utf-8"), "text/x-diff")
     return {"verdict": "final_pass"}
