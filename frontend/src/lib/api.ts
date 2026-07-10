@@ -67,6 +67,7 @@ export const api = {
   createRun: (repo_url: string) =>
     request<Run>("/runs", { method: "POST", body: JSON.stringify({ repo_url }) }),
   deleteRun: (id: string) => request<void>(`/runs/${id}`, { method: "DELETE" }),
+  retryRun: (id: string) => request<Run>(`/runs/${id}/retry`, { method: "POST" }),
   approveRun: (id: string) => request<Run>(`/runs/${id}/approve`, { method: "POST" }),
   stepDiff: (id: string, step: number) => request<string>(`/runs/${id}/steps/${step}/diff`),
   finalPatch: (id: string) => request<string>(`/runs/${id}/patch`),

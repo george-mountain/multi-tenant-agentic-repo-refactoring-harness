@@ -107,7 +107,11 @@ async def create_run(
     )
     session.add(run)
     await session.commit()
+    await _enqueue(run)
+    return RunResponse.from_row(run)
 
+
+async def _enqueue(run: Run) -> None:
     await enqueue_run(
         {
             "run_id": run.id,
@@ -123,7 +127,6 @@ async def create_run(
             "approval_required": run.approval_required,
         }
     )
-    return RunResponse.from_row(run)
 
 
 class RunListResponse(BaseModel):
@@ -213,6 +216,33 @@ async def delete_run(
     await session.delete(run)
     await session.commit()
     await asyncio.to_thread(delete_run_artifacts, run.id)
+
+
+@router.post("/{run_id}/retry", response_model=RunResponse)
+async def retry_run(
+    run_id: str,
+    principal: Principal = CurrentPrincipal,
+    session: AsyncSession = Depends(get_session),
+) -> RunResponse:
+    original = await _get_owned_run(run_id, principal, session)
+    if original.status in ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail="run is still in progress")
+    run = Run(
+        tenant_id=principal.tenant_id,
+        created_by=principal.user_id,
+        repo_url=original.repo_url,
+        base_branch=original.base_branch,
+        objective="",
+        provider=original.provider,
+        model=original.model,
+        test_cmd=original.test_cmd,
+        lint_cmd=original.lint_cmd,
+        approval_required=original.approval_required,
+    )
+    session.add(run)
+    await session.commit()
+    await _enqueue(run)
+    return RunResponse.from_row(run)
 
 
 @router.post("/{run_id}/approve", response_model=RunResponse)

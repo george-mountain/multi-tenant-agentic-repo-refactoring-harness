@@ -157,6 +157,16 @@ export default function DashboardPage() {
     }
   }
 
+  async function retry(event: React.MouseEvent, run: Run) {
+    event.stopPropagation();
+    try {
+      const fresh = await api.retryRun(run.id);
+      navigate(`/runs/${fresh.id}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not retry the run.");
+    }
+  }
+
   return (
     <>
       <section className="hero">
@@ -294,19 +304,29 @@ export default function DashboardPage() {
                       {ACTIVE.includes(run.status) ? (
                         <span className="cell-dim" title="Finish before deleting">—</span>
                       ) : (
-                        <button
-                          className="icon-btn"
-                          title="Delete run"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setPendingDelete(run);
-                          }}
-                        >
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m2 0v14a1 1 0 01-1 1H6a1 1 0 01-1-1V6" strokeLinecap="round" strokeLinejoin="round" />
-                            <path d="M10 11v6M14 11v6" strokeLinecap="round" />
-                          </svg>
-                        </button>
+                        <div className="row-actions">
+                          {run.status === "failed" && (
+                            <button className="icon-btn retry-btn" title="Retry run" onClick={(e) => retry(e, run)}>
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M21 12a9 9 0 11-3-6.7L21 8" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M21 3v5h-5" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </button>
+                          )}
+                          <button
+                            className="icon-btn"
+                            title="Delete run"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPendingDelete(run);
+                            }}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m2 0v14a1 1 0 01-1 1H6a1 1 0 01-1-1V6" strokeLinecap="round" strokeLinejoin="round" />
+                              <path d="M10 11v6M14 11v6" strokeLinecap="round" />
+                            </svg>
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
